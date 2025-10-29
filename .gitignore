@@ -1,0 +1,7 @@
+nginx-*.tar.gz
+ModSecurity/
+ModSecurity-nginx/
+crs/
+/var/log/
+/etc/nginx/
+/etc/systemd/system/nginx.service
