@@ -13,16 +13,6 @@ ok()    { echo -e "\033[0;32m[OK]\033[0m $*"; }
 warn()  { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 fail()  { echo -e "\033[0;31m[FAIL]\033[0m $*" >&2; exit 1; }
 
-install_packages() {
-    local packages=("$@")
-    if command -v dnf >/dev/null 2>&1; then
-        sudo dnf -y groupinstall "Development Tools"
-        sudo dnf -y install "${packages[@]}"
-    else
-        fail "Only Fedora/RHEL-based systems with dnf are supported. Install dependencies manually."
-    fi
-}
-
 clone_repo() {
     local repo_url="$1" dest_dir="$2" branch="${3:-}"
     if [[ -d "$dest_dir" ]]; then
@@ -39,10 +29,8 @@ download_file() {
 }
 
 info "Installing dependencies..."
-install_packages \
-    git wget curl unzip pcre2-devel zlib-devel openssl-devel \
-    libxml2-devel curl-devel yajl-devel ssdeep-devel lmdb-devel \
-    GeoIP-devel libmaxminddb-devel doxygen
+sudo pacman -Sy --noconfirm --needed \
+    yajl ssdeep geoip libmaxminddb doxygen
 
 sudo mkdir -p "$BUILD_DIR"
 
@@ -59,17 +47,22 @@ clone_repo "https://github.com/SpiderLabs/ModSecurity" "ModSecurity" "v${MODSEC_
 
 cd ModSecurity
 git submodule update --init
-./build.sh
-./configure
+./build.sh || fail "ModSecurity build.sh failed"
+./configure || fail "ModSecurity configure failed"
 make -j"$(nproc)"
 sudo make install
+
+info "Updating library cache..."
+sudo ldconfig
+ok "libModSecurity installed and library cache updated"
+
 cd "$BUILD_DIR"
 
 info "Cloning ModSecurity-nginx connector..."
 clone_repo "$CONNECTOR_REPO" "ModSecurity-nginx"
 
-info "Downloading and building Nginx v${NGINX_VERSION}..."
-download_file "http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "nginx-${NGINX_VERSION}.tar.gz"
+info "Downloading and building nginx v${NGINX_VERSION}..."
+download_file "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "nginx-${NGINX_VERSION}.tar.gz"
 tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
 cd "nginx-${NGINX_VERSION}"
 
@@ -85,17 +78,20 @@ cd "nginx-${NGINX_VERSION}"
   --with-http_stub_status_module \
   --with-stream \
   --with-compat \
-  --add-dynamic-module="${BUILD_DIR}/ModSecurity-nginx"
+  --add-dynamic-module="${BUILD_DIR}/ModSecurity-nginx" || fail "nginx configure failed"
 
-make -j"$(nproc)"
+make -j"$(nproc)" || fail "nginx build failed"
 sudo make install
+
+sudo cp conf/mime.types /etc/nginx/
+ok "mime.types copied to /etc/nginx/"
 
 sudo mkdir -p /etc/nginx/modules
 sudo cp objs/ngx_http_modsecurity_module.so /etc/nginx/modules/
 sudo chown -R root:nginx /etc/nginx/modules
 sudo chmod 750 /etc/nginx/modules
 sudo chmod 640 /etc/nginx/modules/ngx_http_modsecurity_module.so
-ok "Nginx installed with ModSecurity module"
+ok "nginx installed with ModSecurity module"
 
 info "Installing OWASP CRS..."
 sudo mkdir -p /etc/nginx/modsec/
@@ -126,19 +122,8 @@ Include "/etc/nginx/modsec/crs/crs-setup.conf"
 Include "/etc/nginx/modsec/crs/rules/*.conf"
 EOF
 
-info "Creating directories and default files..."
-sudo mkdir -p /var/log/nginx /usr/share/nginx/html
-
-sudo tee /usr/share/nginx/html/index.html >/dev/null <<'EOF'
-<!DOCTYPE html>
-<html>
-<head><title>Welcome to nginx with ModSecurity!</title></head>
-<body>
-  <h1>nginx with ModSecurity is running.</h1>
-  <p>Successfully installed and working.</p>
-</body>
-</html>
-EOF
+info "Creating required directories..."
+sudo mkdir -p /var/log/nginx /usr/share/nginx/html /var/run
 
 info "Writing nginx.conf..."
 sudo tee /etc/nginx/nginx.conf >/dev/null <<'EOF'
@@ -189,6 +174,8 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+info "Reloading systemd daemon..."
+sudo systemctl daemon-reload
 sudo systemctl enable nginx
 sudo systemctl restart nginx
 ok "nginx service started"
@@ -211,6 +198,5 @@ cat <<EOF
 Installation complete!
 Config:   /etc/nginx/modsec/
 Rules:    /etc/nginx/modsec/crs/rules/
-Web root: /usr/share/nginx/html/
 ===============================================================================
 EOF
